@@ -2,7 +2,7 @@
 
 **ayn** is a simple CLI utility for Linux / WSL designed to save a project's directory structure and file contents into a single text document.
 
-It is built to easily prepare context for **AI assistants (LLM)**, perform quick code audits, or share source code with others.
+It is built to easily prepare clean context for **AI assistants (LLMs)**, perform quick code audits, or share source code with others.
 
 ---
 
@@ -10,9 +10,10 @@ It is built to easily prepare context for **AI assistants (LLM)**, perform quick
 
 - **Structure Export:** Generates a directory tree without file contents.
 - **Content Export:** Bundles the structure and source code of all files into a single `.txt` file.
+- **Environment & Build Exclusion (`-ne`):** Skips heavy and generated folders (`.venv`, `node_modules`, `.git`, `dist`, `__pycache__`, etc.).
 - **Sensitive Data Protection (`-ns`):** Automatically masks `.env`, SSH keys, certificates, and other secrets.
 - **Flexible Filtering:** Export only specified files or exclude unwanted ones (`-ex`).
-- **Smart Processing:** Automatically skips binary files and prevents duplicate entries.
+- **Smart Processing:** Smart virtual environment detection heuristics, automatic binary file skipping, and duplicate prevention.
 - **Zero Dependencies:** Runs on pure Python 3.10+ without requiring a `virtualenv`.
 
 ---
@@ -78,56 +79,79 @@ ayn struc
 ```
 Creates a text file containing the tree of directories and files (without their contents).
 
+*Skip environment and build directories:*
+```bash
+ayn struc -ne
+```
+
 ### 2. Save structure and contents of all files
 ```bash
 ayn cont .
 ```
 Writes the project tree followed by the content of every text file.
 
-### 3. Save everything except secret data (No Secrets)
+### 3. Exclude environments, caches, and dependencies (No Environment)
+```bash
+ayn cont -ne
+```
+Ignores system and generated folders (`node_modules`, `.venv`, `.git`, `build`, etc.) during tree rendering and content processing.
+
+### 4. Save everything except secret data (No Secrets)
 ```bash
 ayn cont -ns
 ```
 Works like `ayn cont .`, but skips the contents of files matching secret patterns (`.env`, `*.key`, `id_rsa`, etc.).
 
-### 4. Save only specified files
+### 5. Perfect AI Mode (No Environment + No Secrets)
 ```bash
-ayn cont src/main.rs Cargo.toml
+ayn cont -ne -ns
 ```
-Writes the overall project structure, but appends the content of **only** the listed files.
+Flags can be combined! This is the optimal command to generate context for ChatGPT, Claude, or DeepSeek.
 
-### 5. Exclude specified files
+### 6. Save only specified files or exclude them
 ```bash
+# Specific files only
+ayn cont src/main.rs Cargo.toml
+
+# Exclude specific files/directories (-ex)
 ayn cont -ex .env secrets.txt docs/
 ```
-Writes the project structure and contents of all files, **except** those passed as arguments.
 
 ---
 
 ## 💡 Common Use Cases
 
-* **Prepare project context for ChatGPT / Claude:**
+* **Best workflow for prompting LLMs with clean repository context:**
   ```bash
-  ayn cont -ns
+  ayn cont -ne -ns
   ```
-* **Quickly share project structure with a teammate:**
+* **Quickly inspect clean project structure without `.git` or `node_modules`:**
   ```bash
-  ayn struc
+  ayn struc -ne
   ```
-* **Export only configuration files and entry points:**
+* **Export configuration files and entry points:**
   ```bash
   ayn cont Cargo.toml src/main.rs
   ```
 
 ---
 
-## 🛡 Security & `-ns` Mode
+## ⚙️ Flag Details
 
-When using the `-ns` (No Secrets) flag, the utility checks filenames and automatically redacts file contents if they match any of the following patterns:
+### `-ne` Mode (No Environment)
+Automatically filters out generated directories, vendor dependencies, and build artifacts. Ignores:
+- **Dependencies & Environments:** `.venv`, `venv`, `env`, `node_modules`, `pip-wheel-metadata`, `*.egg-info`.
+- **Caches & Compiled files:** `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.cache`, `.parcel-cache`.
+- **Build Artifacts:** `dist`, `build`, `target`, `out`, `coverage`, `.next`, `.nuxt`, `.turbo`.
+- **VCS & Configs:** `.git`, `.github`, `.gitlab`, `.svn`, `.hg`.
+- **IDE Settings:** `.vscode`, `.idea`.
+- **Heuristic Detection:** Even if a virtual environment folder has a custom name, `ayn` detects and skips it via internal markers (`pyvenv.cfg`, `activate`, `python.exe`, etc.).
 
-- `.env`, `.env.*`
+### `-ns` Mode (No Secrets)
+Protects sensitive information. Masks file contents if filenames match any of the following patterns:
+- `.env`, `.env.*`, `*.env`, `*.secret`, `*credential*`
 - `*.key`, `*.pem`, `*.crt`, `*.p12`, `*.pfx`
-- `id_rsa`, `id_ed25519`
+- `id_rsa`, `id_dsa`, `id_ecdsa`, `id_ed25519`
 - `.npmrc`, `.git-credentials`
 
 ---
@@ -178,11 +202,9 @@ ayn/
 ## 📌 TODO / Roadmap
 
 - [ ] Add `.aynignore` configuration file support.
-- [ ] Customizable secret pattern list.
-- [ ] Custom folder exclusion using glob patterns.
+- [ ] Customizable secret and ignore pattern CLI options.
 - [ ] Format output in clean Markdown.
 - [ ] Add clipboard support (`--clip` flag).
-- [ ] Render directory trees in standard `tree` format.
 
 ---
 
