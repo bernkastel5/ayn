@@ -9,6 +9,423 @@ from pathlib import Path
 from typing import Iterable
 
 
+SENSITIVE_PATTERNS = (
+    ".env",
+    ".env.*",
+    "*.env",
+    "*.key",
+    "*.pem",
+    "*.crt",
+    "*.p12",
+    "*.pfx",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+    "*.secret",
+    "*secret*",
+    "*credential*",
+    "*.credentials",
+    ".npmrc",
+    ".git-credentials",
+)
+
+NE_DIR_PATTERNS = (
+    ".git",
+    ".git*",
+    ".github",
+    ".github*",
+    ".gitlab",
+    ".gitlab*",
+    ".svn",
+    ".svn*",
+    ".hg",
+    ".hg*",
+    ".venv",
+    ".venv*",
+    "venv",
+    "venv*",
+    "env",
+    "env*",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".tox",
+    ".nox",
+    ".pytype",
+    ".cache",
+    ".ipynb_checkpoints",
+    ".idea",
+    ".idea*",
+    ".vscode",
+    ".vscode*",
+    "dist",
+    "build",
+    "target",
+    "out",
+    "coverage",
+    ".parcel-cache",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".gradle",
+    "pip-wheel-metadata",
+    "*.egg-info",
+    "*.dist-info",
+    ".terraform",
+    ".terraform*",
+)
+
+BINARY_EXTENSIONS = {
+    ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".ico", ".tiff", ".tif",
+    ".pdf", ".zip", ".rar", ".7z", ".gz", ".bz2", ".xz", ".tar",
+    ".exe", ".dll", ".so", ".dylib", ".bin",
+    ".mp3", ".wav", ".flac", ".ogg",
+    ".mp4", ".mkv", ".avi", ".mov",
+    ".class", ".jar", ".war", ".ear",
+    ".wasm",
+    ".psd", ".ai",
+}
+
+BOM_UTF8 = b"\xef\xbb\xbf"
+BOM_UTF16_LE = b"\xff\xfe"
+BOM_UTF16_BE = b"\xfe\xff"
+BOM_UTF32_LE = b"\xff\xfe\x00\x00"
+BOM_UTF32_BE = b"\x00\x00\xfe\xff"
+
+
+def now_stamp() -> str:
+    return dt.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+
+
+def path_id(p: Path) -> str:
+    return str(p.resolve(strict=False))
+
+
+def is_inside_root(root: Path, p: Path) -> bool:
+    try:
+        p.resolve(strict=False).relative_to(root.resolve(strict=False))
+        return True
+    except ValueError:
+        return False
+
+
+def resolve_target(root: Path, raw: str) -> Path:
+    raw_path = Path(raw)
+    if raw_path.is_absolute():
+        candidate = raw_path.resolve(strict=False)
+    else:
+        candidate = (root / raw_path).resolve(strict=False)
+
+    if not candidate.exists():
+        raise FileNotFoundError(f"Не найден путь: {raw}")
+
+    if not is_inside_root(root, candidate):
+        raise ValueError(f"Путь вне текущей директории: {raw}")
+
+    return candidate
+
+
+def matches_any_component(rel_path: str, patterns: Iterable[str]) -> bool:
+    parts = Path(rel_path).parts
+    for part in parts:
+        for pattern in patterns:
+            if fnmatch(part, pattern):
+                return True
+    return False
+
+
+def is_sensitive(rel_path: str) -> bool:
+    name = Path(rel_path).name
+    return any(
+        fnmatch(name, pattern) or fnmatch(rel_path, pattern)
+        for pattern in SENSITIVE_PATTERNS
+    )
+
+
+def looks_like_virtualenv(dir_path: Path) -> bool:
+    """
+    Эвристика для виртуального окружения, даже если папка названа нестандартно.
+    """
+    markers = (
+        dir_path / "pyvenv.cfg",
+        dir_path / "bin" / "activate",
+        dir_path / "bin" / "python",
+        dir_path / "Scripts" / "activate.bat",
+        dir_path / "Scripts" / "python.exe",
+        dir_path / "Lib" / "site-packages",
+        dir_path / "site-packages",
+    )
+    return any(marker.exists() for marker in markers)
+
+
+def should_skip_ne(root: Path, p: Path) -> bool:
+    """
+    True, если путь относится к служебной/генерируемой директории,
+    которую нужно скрывать при -ne.
+    """
+    try:
+        rel = p.relative_to(root).as_posix()
+    except ValueError:
+        rel = p.as_posix()
+
+    if matches_any_component(rel, NE_DIR_PATTERNS):
+        return True
+
+    if p.is_dir() and not p.is_symlink() and looks_like_virtualenv(p):
+        return True
+
+    return False
+
+
+def detect_text_encoding(p: Path, sample_size: int = 8192) -> str | None:
+    """
+    Возвращает encoding, если файл похож на текстовый.
+    Иначе None.
+    """
+    if p.suffix.lower() in BINARY_EXTENSIONS:
+        return None
+
+    try:
+        with p.open("rb") as f:
+            sample = f.read(sample_size)
+    except Exception:
+        return None
+
+    if not sample:
+        return "utf-8"
+
+    if sample.startswith(BOM_UTF32_LE) or sample.startswith(BOM_UTF32_BE):
+        return "utf-32"
+
+    if sample.startswith(BOM_UTF8):
+        return "utf-8-sig"
+
+    if sample.startswith(BOM_UTF16_LE) or sample.startswith(BOM_UTF16_BE):
+        return "utf-16"
+
+    if b"\x00" in sample:
+        return None
+
+    try:
+        sample.decode("utf-8")
+        return "utf-8"
+    except UnicodeDecodeError:
+        return None
+
+
+def read_text_file(p: Path) -> str:
+    encoding = detect_text_encoding(p)
+    if encoding is None:
+        return "[binary or non-text file skipped]"
+
+    try:
+        return p.read_text(encoding=encoding, errors="replace")
+    except Exception as e:
+        return f"[Не удалось прочитать файл: {e}]"
+
+
+def all_files(root: Path, ne: bool = False) -> list[Path]:
+    files: list[Path] = []
+
+    for dirpath, dirnames, filenames in os.walk(root, topdown=True, followlinks=False):
+        current_dir = Path(dirpath)
+
+        # Фильтруем и не спускаемся в служебные директории
+        pruned_dirs: list[str] = []
+        for d in sorted(dirnames, key=str.lower):
+            child = current_dir / d
+
+            if child.is_symlink():
+                continue
+
+            if ne and should_skip_ne(root, child):
+                continue
+
+            pruned_dirs.append(d)
+
+        dirnames[:] = pruned_dirs
+
+        for name in sorted(filenames, key=str.lower):
+            p = current_dir / name
+
+            if ne and should_skip_ne(root, p):
+                continue
+
+            files.append(p)
+
+    files = sorted(dict.fromkeys(files), key=lambda x: x.relative_to(root).as_posix().lower())
+    return files
+
+
+def expand_targets(root: Path, targets: list[str], ne: bool = False) -> list[Path]:
+    selected: dict[str, Path] = {}
+
+    for raw in targets:
+        if raw == ".":
+            for p in all_files(root, ne=ne):
+                selected[path_id(p)] = p
+            continue
+
+        p = resolve_target(root, raw)
+
+        if ne and should_skip_ne(root, p):
+            continue
+
+        if p.is_dir() and not p.is_symlink():
+            for child in all_files(p, ne=ne):
+                if ne and should_skip_ne(root, child):
+                    continue
+                selected[path_id(child)] = child
+        elif p.is_file():
+            selected[path_id(p)] = p
+        else:
+            raise FileNotFoundError(f"Не найден файл или директория: {raw}")
+
+    result = list(selected.values())
+    result.sort(key=lambda x: x.relative_to(root).as_posix().lower())
+    return result
+
+
+def build_tree(root: Path, ignore_ids: set[str] | None = None, ne: bool = False) -> str:
+    ignore_ids = ignore_ids or set()
+    lines = ["."]
+
+    def walk(dir_path: Path, prefix: str = "") -> None:
+        try:
+            children = list(dir_path.iterdir())
+        except PermissionError:
+            return
+
+        entries = []
+        for child in sorted(children, key=lambda p: p.name.lower()):
+            if path_id(child) in ignore_ids:
+                continue
+
+            if ne and should_skip_ne(root, child):
+                continue
+
+            entries.append(child)
+
+        for i, child in enumerate(entries):
+            last = i == len(entries) - 1
+            connector = "└── " if last else "├── "
+            is_dir = child.is_dir() and not child.is_symlink()
+            label = child.name + ("/" if is_dir else "")
+            lines.append(prefix + connector + label)
+
+            if is_dir:
+                walk(child, prefix + ("    " if last else "│   "))
+
+    walk(root)
+    return "\n".join(lines)
+
+
+def build_contents(root: Path, files: Iterable[Path], ns: bool = False, ne: bool = False) -> str:
+    parts: list[str] = []
+
+    for p in files:
+        rel = p.relative_to(root).as_posix()
+
+        if ne and should_skip_ne(root, p):
+            continue
+
+        if ns and is_sensitive(rel):
+            content = "[Содержимое скрыто по -ns]"
+        else:
+            encoding = detect_text_encoding(p)
+            if encoding is None:
+                continue
+            content = read_text_file(p)
+
+        parts.append(f"{rel}\n\n{content}\n\n")
+
+    return "".join(parts)
+
+
+def make_output_path(root: Path, command: str, custom: str | None = None) -> Path:
+    if custom:
+        p = Path(custom)
+        return p if p.is_absolute() else (root / p)
+    return root / f"ayn_{command}_{now_stamp()}.txt"
+
+
+def main() -> None:
+    parser = argparse.ArgumentParser(
+        prog="ayn",
+        description="Сохранение структуры проекта и содержимого файлов",
+    )
+
+    sub = parser.add_subparsers(dest="cmd", required=True)
+
+    p_struc = sub.add_parser("struc", help="Сохраняет только структуру проекта")
+    p_struc.add_argument("-ne", action="store_true", help="Скрыть служебные папки (.git, .venv, node_modules и т.п.)")
+    p_struc.add_argument("-o", "--output", help="Имя выходного файла")
+
+    p_cont = sub.add_parser("cont", help="Сохраняет структуру и содержимое файлов")
+    p_cont.add_argument("paths", nargs="*", help="Файлы или директории внутри текущей директории")
+    p_cont.add_argument("-ns", action="store_true", help="Не включать чувствительные файлы (.env и т.п.)")
+    p_cont.add_argument("-ne", action="store_true", help="Скрыть служебные папки (.git, .venv, node_modules и т.п.)")
+    p_cont.add_argument("-ex", nargs="+", dest="exclude", help="Исключить указанные файлы/директории из содержимого")
+    p_cont.add_argument("-o", "--output", help="Имя выходного файла")
+
+    args = parser.parse_args()
+    root = Path.cwd().resolve()
+
+    if args.cmd == "struc":
+        out = make_output_path(root, "struc", args.output)
+        tree_text = build_tree(root, ignore_ids={path_id(out)}, ne=args.ne)
+        out.write_text(tree_text + "\n", encoding="utf-8")
+        print(str(out))
+        return
+
+    if args.cmd == "cont":
+        if args.exclude and args.paths:
+            parser.error("-ex нельзя использовать вместе с позиционными путями")
+
+        out = make_output_path(root, "cont", args.output)
+
+        if args.exclude:
+            excluded = expand_targets(root, args.exclude, ne=args.ne)
+            excluded_ids = {path_id(p) for p in excluded}
+            files = [p for p in all_files(root, ne=args.ne) if path_id(p) not in excluded_ids]
+        elif args.paths:
+            files = expand_targets(root, args.paths, ne=args.ne)
+        else:
+            files = all_files(root, ne=args.ne)
+
+        unique_files: list[Path] = []
+        seen: set[str] = set()
+        for p in files:
+            pid = path_id(p)
+            if pid in seen:
+                continue
+            seen.add(pid)
+            unique_files.append(p)
+
+        tree_text = build_tree(root, ignore_ids={path_id(out)}, ne=args.ne)
+        content_text = build_contents(root, unique_files, ns=args.ns, ne=args.ne)
+
+        final_text = tree_text + "\n\n" + content_text if content_text else tree_text + "\n"
+        out.write_text(final_text, encoding="utf-8")
+        print(str(out))
+        return
+
+
+if __name__ == "__main__":
+    main()#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import os
+from fnmatch import fnmatch
+from pathlib import Path
+from typing import Iterable
+
+
 SENSITIVE_PATTERNS = [
     ".env",
     ".env.*",
