@@ -76,6 +76,7 @@ NE_DIR_PATTERNS = (
     "*.dist-info",
     ".terraform",
     ".terraform*",
+    "Cargo.lock"
 )
 
 BINARY_EXTENSIONS = {
